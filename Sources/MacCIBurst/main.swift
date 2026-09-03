@@ -20,6 +20,8 @@ private struct RunnerStatus: Decodable {
     let serviceLoaded: Bool
     let freeGiB: Int
     let minimumFreeGiB: Int
+    // Present since the tiered disk guard; older status output omits it.
+    let softFreeGiB: Int?
     let currentJob: CurrentJob?
 }
 
@@ -172,7 +174,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             jobItem.isHidden = true
         }
         detailItem.isHidden = false
-        diskItem.title = "Disk: \(status.freeGiB) GiB free (\(status.minimumFreeGiB) GiB required)"
+        var diskTitle = "Disk: \(status.freeGiB) GiB free (\(status.minimumFreeGiB) GiB required)"
+        if let soft = status.softFreeGiB, status.freeGiB < soft {
+            diskTitle += " · reclaiming below \(soft) GiB"
+        }
+        diskItem.title = diskTitle
         diskItem.isHidden = false
         updateActions()
     }

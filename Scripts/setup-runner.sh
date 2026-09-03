@@ -17,7 +17,15 @@ done
 : "${BURST_LABEL:?BURST_LABEL is required}"
 : "${RUNNER_DIR:?RUNNER_DIR is required}"
 : "${MIN_FREE_GIB:=100}"
+: "${SOFT_FREE_GIB:=$(( MIN_FREE_GIB * 2 ))}"
 : "${SETUP_MIN_FREE_GIB:=5}"
+: "${CACHE_DIRS:=}"
+: "${ARTIFACT_DIR:=}"
+: "${ARTIFACT_KEEP:=3}"
+: "${SWEEP_CMD:=}"
+: "${SWEEP_DAYS:=3}"
+: "${CLEAN_CMD:=}"
+: "${CLEAN_RM:=0}"
 : "${RUNNER_LABELS:=self-hosted,macOS,burst}"
 : "${DISK_VOLUME:=/System/Volumes/Data}"
 
@@ -77,9 +85,21 @@ config_args=(
 [[ "$GITHUB_SCOPE_TYPE" == org && "$RUNNER_GROUP" != Default ]] && config_args+=(--runnergroup "$RUNNER_GROUP")
 "$RUNNER_DIR/config.sh" "${config_args[@]}"
 
-print -r -- "ACTIONS_RUNNER_HOOK_JOB_STARTED=$APP_SUPPORT/bin/pre-job-disk-guard.sh" > "$RUNNER_DIR/.env"
-print -r -- "MAC_CI_BURST_MIN_FREE_GIB=$MIN_FREE_GIB" >> "$RUNNER_DIR/.env"
-print -r -- "MAC_CI_BURST_DISK_VOLUME=$DISK_VOLUME" >> "$RUNNER_DIR/.env"
+# The job-started hook reads its policy from the runner .env, so the same
+# thresholds and command templates apply whether a job or the controller runs it.
+{
+  print -r -- "ACTIONS_RUNNER_HOOK_JOB_STARTED=$APP_SUPPORT/bin/pre-job-disk-guard.sh"
+  print -r -- "MAC_CI_BURST_MIN_FREE_GIB=$MIN_FREE_GIB"
+  print -r -- "MAC_CI_BURST_SOFT_FREE_GIB=$SOFT_FREE_GIB"
+  print -r -- "MAC_CI_BURST_DISK_VOLUME=$DISK_VOLUME"
+  print -r -- "MAC_CI_BURST_CACHE_DIRS=$CACHE_DIRS"
+  print -r -- "MAC_CI_BURST_ARTIFACT_DIR=$ARTIFACT_DIR"
+  print -r -- "MAC_CI_BURST_ARTIFACT_KEEP=$ARTIFACT_KEEP"
+  print -r -- "MAC_CI_BURST_SWEEP_CMD=$SWEEP_CMD"
+  print -r -- "MAC_CI_BURST_SWEEP_DAYS=$SWEEP_DAYS"
+  print -r -- "MAC_CI_BURST_CLEAN_CMD=$CLEAN_CMD"
+  print -r -- "MAC_CI_BURST_CLEAN_RM=$CLEAN_RM"
+} > "$RUNNER_DIR/.env"
 (cd "$RUNNER_DIR" && ./svc.sh install)
 
 "$APP_SUPPORT/bin/mac-ci-burst" off

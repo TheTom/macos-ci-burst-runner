@@ -16,6 +16,49 @@ The controller has four operator states:
 It also enforces a configurable free-disk floor before availability and again in
 a GitHub Actions job-start hook.
 
+## Tiered disk guard
+
+The job-start hook is a tiered guard rather than a single threshold check. It
+re-measures free space between tiers and stops as soon as the space is back:
+
+- **Tier 0 (always):** remove per-run artifact directories under `ARTIFACT_DIR`,
+  keeping the newest `ARTIFACT_KEEP` and the directory for the current
+  `GITHUB_RUN_ID`.
+- **Tier 1 (free below `SOFT_FREE_GIB`):** run `SWEEP_CMD` over each entry in
+  `CACHE_DIRS` to drop build artifacts older than `SWEEP_DAYS`. With no template
+  configured this uses `cargo-sweep` when it is available, and is skipped
+  otherwise.
+- **Tier 2 (free below `MIN_FREE_GIB`, admission only):** run `CLEAN_CMD` over
+  the same directories. The default is `cargo clean`; deleting a tree outright
+  requires an explicit `CLEAN_RM=1`.
+
+Admission is denied with exit 75 only if free space is still under the floor
+after tier 2. The controller also runs tiers 0 and 1 as an idle housekeeping
+pass (`mac-ci-burst reconcile`) while the runner is Available, idle, and between
+the floor and the soft threshold, at most once per `SWEEP_INTERVAL_SECONDS`.
+Nothing is swept while a job is running, and sweeping never removes eligibility.
+`CACHE_DIRS` is empty by default, which leaves the guard behaving as a plain
+free-space floor.
+
+### Disk guard configuration
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `MIN_FREE_GIB` | `100` | Hard floor; admission is denied below it. |
+| `SOFT_FREE_GIB` | `2 * MIN_FREE_GIB` | Reclamation threshold; never denies. |
+| `DISK_VOLUME` | `/System/Volumes/Data` | Volume measured. |
+| `SWEEP_INTERVAL_SECONDS` | `3600` | Minimum gap between idle sweeps. |
+| `CACHE_DIRS` | empty | Colon-separated directories or globs, in order; relative to the runner `_work`. |
+| `ARTIFACT_DIR` | empty | Per-run artifact parent; empty disables tier 0. |
+| `ARTIFACT_KEEP` | `3` | Newest artifact directories to keep. |
+| `SWEEP_CMD` | `cargo-sweep` when present | Tier 1 template; `{dir}` and `{days}` are substituted. |
+| `SWEEP_DAYS` | `3` | Age handed to the sweep template. |
+| `CLEAN_CMD` | `cargo clean` when present | Tier 2 template; `{dir}` is substituted. |
+| `CLEAN_RM` | `0` | Set to `1` to allow `rm -rf {dir}` as the tier 2 fallback. |
+
+The guard can also be run by hand with `MAC_CI_BURST_GUARD_MODE=sweep` and
+`MAC_CI_BURST_DRY_RUN=1` to see what it would reclaim without changing anything.
+
 ## Security first
 
 A self-hosted runner executes repository-controlled code on your Mac. Use a
@@ -126,7 +169,7 @@ mac-ci-burst status       # JSON status for scripts or diagnostics
 mac-ci-burst available    # pass disk gate, add eligibility, start runner
 mac-ci-burst drain        # remove eligibility, finish current job, stop
 mac-ci-burst off          # stop now; refuses while GitHub says busy
-mac-ci-burst reconcile    # enforce desired state and disk floor
+mac-ci-burst reconcile    # enforce desired state, disk floor, and idle sweeps
 ```
 
 The installed command lives in

@@ -8,6 +8,8 @@ CONFIG_FILE="${MAC_CI_BURST_CONFIG:-$APP_SUPPORT/config.env}"
 STATE_FILE="${MAC_CI_BURST_STATE:-$APP_SUPPORT/desired-state}"
 CAFFEINATE_LABEL="dev.mac-ci-burst.caffeinate"
 CAFFEINATE_PLIST="$HOME/Library/LaunchAgents/$CAFFEINATE_LABEL.plist"
+DISK_GUARD="${MAC_CI_BURST_GUARD:-$APP_SUPPORT/bin/pre-job-disk-guard.sh}"
+SWEEP_STAMP="$APP_SUPPORT/last-sweep"
 
 [[ -f "$CONFIG_FILE" ]] || { print -u2 "Missing configuration: $CONFIG_FILE"; exit 78; }
 source "$CONFIG_FILE"
@@ -18,7 +20,16 @@ source "$CONFIG_FILE"
 : "${BURST_LABEL:?BURST_LABEL is required}"
 : "${RUNNER_DIR:?RUNNER_DIR is required}"
 : "${MIN_FREE_GIB:=100}"
+: "${SOFT_FREE_GIB:=$(( MIN_FREE_GIB * 2 ))}"
+: "${SWEEP_INTERVAL_SECONDS:=3600}"
 : "${DISK_VOLUME:=/System/Volumes/Data}"
+: "${CACHE_DIRS:=}"
+: "${ARTIFACT_DIR:=}"
+: "${ARTIFACT_KEEP:=3}"
+: "${SWEEP_CMD:=}"
+: "${SWEEP_DAYS:=3}"
+: "${CLEAN_CMD:=}"
+: "${CLEAN_RM:=0}"
 : "${MONITORED_REPOSITORIES:=}"
 : "${USE_CAFFEINATE:=1}"
 
@@ -131,6 +142,49 @@ free_gib() {
   df -Pk "$DISK_VOLUME" | awk 'NR == 2 { printf "%d", $4 / 1024 / 1024 }'
 }
 
+# The guard owns all reclamation policy; the controller only supplies the
+# runner's paths, thresholds, and command templates and picks the mode.
+run_disk_guard() {
+  local mode="$1" line key
+  [[ -x "$DISK_GUARD" ]] || return 0
+  local -a env_pairs
+  env_pairs=(
+    "MAC_CI_BURST_GUARD_MODE=$mode"
+    "MAC_CI_BURST_MIN_FREE_GIB=$MIN_FREE_GIB"
+    "MAC_CI_BURST_SOFT_FREE_GIB=$SOFT_FREE_GIB"
+    "MAC_CI_BURST_DISK_VOLUME=$DISK_VOLUME"
+    "MAC_CI_BURST_CACHE_DIRS=$CACHE_DIRS"
+    "MAC_CI_BURST_ARTIFACT_DIR=$ARTIFACT_DIR"
+    "MAC_CI_BURST_ARTIFACT_KEEP=$ARTIFACT_KEEP"
+    "MAC_CI_BURST_SWEEP_CMD=$SWEEP_CMD"
+    "MAC_CI_BURST_SWEEP_DAYS=$SWEEP_DAYS"
+    "MAC_CI_BURST_CLEAN_CMD=$CLEAN_CMD"
+    "MAC_CI_BURST_CLEAN_RM=$CLEAN_RM"
+    "RUNNER_WORK=$RUNNER_DIR/_work"
+    "RUNNER_TOOL_CACHE=$RUNNER_DIR/_work/_tool"
+  )
+  # The runner's own .env holds the toolchain locations the guard needs to find
+  # cargo and cargo-sweep. Only those two keys are forwarded.
+  if [[ -f "$RUNNER_DIR/.env" ]]; then
+    while IFS= read -r line; do
+      key="${line%%=*}"
+      case "$key" in
+        CARGO_HOME|RUSTUP_HOME) env_pairs+=("$line") ;;
+      esac
+    done < "$RUNNER_DIR/.env"
+  fi
+  env "${env_pairs[@]}" "$DISK_GUARD"
+}
+
+# Idle housekeeping runs at most once per SWEEP_INTERVAL_SECONDS.
+sweep_due() {
+  local now stamp
+  [[ -f "$SWEEP_STAMP" ]] || return 0
+  now="$(date +%s)"
+  stamp="$(stat -f %m "$SWEEP_STAMP" 2>/dev/null || print -n 0)"
+  (( now - stamp >= SWEEP_INTERVAL_SECONDS ))
+}
+
 repositories_to_check() {
   if [[ "$GITHUB_SCOPE_TYPE" == repo ]]; then
     print -r -- "$GITHUB_REPOSITORY"
@@ -187,10 +241,12 @@ status_json() {
     --arg settingsURL "$(settings_url)" --argjson runnerId "${id:-null}" \
     --argjson registered "$registered" --argjson online "$online" --argjson busy "$busy" \
     --argjson schedulable "$schedulable" --argjson serviceLoaded "$service" \
-    --argjson freeGiB "$free" --argjson minimumFreeGiB "$MIN_FREE_GIB" --argjson currentJob "$job" \
+    --argjson freeGiB "$free" --argjson minimumFreeGiB "$MIN_FREE_GIB" \
+    --argjson softFreeGiB "$SOFT_FREE_GIB" --argjson currentJob "$job" \
     '{state:$state,desired:$desired,runnerName:$runnerName,runnerId:$runnerId,settingsURL:$settingsURL,
       registered:$registered,online:$online,busy:$busy,schedulable:$schedulable,
-      serviceLoaded:$serviceLoaded,freeGiB:$freeGiB,minimumFreeGiB:$minimumFreeGiB,currentJob:$currentJob}'
+      serviceLoaded:$serviceLoaded,freeGiB:$freeGiB,minimumFreeGiB:$minimumFreeGiB,
+      softFreeGiB:$softFreeGiB,currentJob:$currentJob}'
 }
 
 make_available() {
@@ -201,6 +257,11 @@ make_available() {
   [[ -n "$id" ]] || { print -u2 "Runner is not registered yet"; exit 78; }
   [[ "$busy" != true ]] || { print -u2 "Runner is already busy; wait or keep draining"; exit 75; }
   free="$(free_gib)"
+  if (( free < MIN_FREE_GIB )); then
+    # Give the tiered guard a chance to reclaim before refusing availability.
+    run_disk_guard admit || true
+    free="$(free_gib)"
+  fi
   (( free >= MIN_FREE_GIB )) || { print -u2 "Only ${free} GiB is free; ${MIN_FREE_GIB} GiB is required"; exit 75; }
   set_desired_state available
   add_burst_label "$id"
@@ -247,6 +308,11 @@ reconcile() {
         if [[ "$busy" == true ]]; then set_desired_state drain
         else stop_service; stop_awake; set_desired_state off
         fi
+      elif [[ "$busy" != true ]] && (( free < SOFT_FREE_GIB )) && sweep_due; then
+        # Idle and heading toward the floor: reclaim now so a future job is not
+        # denied at admission time. Never denies, never touches eligibility.
+        run_disk_guard sweep || true
+        : > "$SWEEP_STAMP"
       fi
       ;;
     off)

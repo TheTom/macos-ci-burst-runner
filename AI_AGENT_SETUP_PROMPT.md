@@ -23,7 +23,10 @@ Safety constraints:
 3. Do not reboot, shut down, or change sleep, firewall, FileVault, login, sharing,
    network, or unrelated service settings.
 4. Do not stop unrelated processes or delete caches, projects, user files, runner
-   workspaces, or existing runner registrations.
+   workspaces, or existing runner registrations. The tiered disk guard may delete
+   only the directories I explicitly configure through `CACHE_DIRS` and
+   `ARTIFACT_DIR`. Do not set `CLEAN_RM=1` without asking me first; it lets the
+   guard remove a configured cache tree outright.
 5. Do not expose the runner to public repositories, forked pull requests, all
    organization repositories, or unreviewed workflows.
 6. Do not guess the GitHub owner, scope, repository access, runner group, runner
@@ -49,7 +52,10 @@ Procedure:
    - a unique runner name;
    - a unique burst label;
    - runner directory;
-   - minimum free GiB;
+   - minimum free GiB, and the soft threshold if it should not be twice that;
+   - disk guard cache directories, artifact directory and retention count, and
+     any sweep or clean command templates, if this Mac should reclaim space
+     instead of only refusing jobs;
    - organization runner group, if applicable;
    - optional repositories used only for current-job links.
 3. For organization scope, have me confirm that the runner group allows only the
@@ -70,7 +76,7 @@ Procedure:
    - the runner is not busy;
    - the service is stopped/offline;
    - the burst label is absent;
-   - the disk floor is correctly reported;
+   - the disk floor and soft threshold are correctly reported;
    - no credentials or personal paths were written inside this Git repository.
 9. Report the configuration using redacted/generic descriptions. Do not make the
    runner Available until I explicitly request the harmless lifecycle test.

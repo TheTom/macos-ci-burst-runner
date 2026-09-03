@@ -14,8 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate shell syntax
-        run: zsh -n Scripts/mac-ci-burst Scripts/*.sh Tests/*.sh
+        run: |
+          zsh -n Scripts/mac-ci-burst Scripts/install-controller.sh \
+            Scripts/setup-runner.sh Tests/*.sh
+          bash -n Scripts/pre-job-disk-guard.sh
       - name: Build menu controller
         run: swift build -c release
-      - name: Test state transitions
+      - name: Test state transitions, disk guard tiers, and idle sweeps
         run: ./Tests/test-controller.sh
